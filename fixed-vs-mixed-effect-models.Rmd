@@ -1,0 +1,225 @@
+---
+title: "Fixed vs Mixed
+Effects Models: A Comparative Analysis of Group-Level Variation"
+author: "Nathan Pavey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+## Introduction
+
+Many datasets contain observations that are naturally grouped, such as students within schools or firms observed across multiple years. In these settings, it is important to determine whether accounting for group-level variation improves model performance.
+
+This project compares fixed effects and mixed effects models using data on UK firms. The objective is to investigate whether modelling random variation within firms improves explanatory and predictive performance.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE
+)
+
+library(ggplot2)
+library(lme4)
+library(caret)
+library(dplyr)
+library(tidyr)
+```
+
+## Data
+
+```{r}
+data = read.csv("UKFirms.csv")
+data$firm = factor(data$firm)
+
+```
+
+The dataset contains annual observations on UK firms including:
+
+-   Firm
+-   Year
+-   Value
+-   Capital
+-   Investment
+
+The firm variable is treated as a grouping factor, allowing both fixed and random effects specifications to be considered.
+
+### Exploratory Analysis
+
+```{r}
+ggplot(data ,aes(x = year, y = value)) + 
+  geom_line() + 
+  facet_wrap(~ firm, scales = "free")
+```
+
+Initial observations indicate significant differences in the value over time, suggesting that firm specific effects may play a role in modelling the data.
+
+### Fixed Effects Modelling
+
+Fitting a baseline fixed effect model for value, with every dependent variable included (M1).
+
+```{r}
+M1 = lm(value ~ capital + year + inv + firm, data = data)
+summary(M1)
+```
+
+Clearly the R\^2 is 0.9613 and the adjusted R\^2 is 0.9588
+
+The model achieved an adjusted R-squared of 0.959, indicating that a large proportion of the variation in the model is explained by these initial variables.
+
+```{r}
+anova(M1)
+```
+
+Test whether the firm variable plays a significant role in modelling the value, conducting a Hypothesis test with
+
+**H0**: firm 1 = firm 2 = ... = firm 10.
+
+**H1**: firm i is not equal to firm j for some i,j where, i,j = 1,2,...,10
+
+Since the ANOVA table is sequential F-value of firm given the other three variables are included = 111.72.
+
+P-value = 2.2e-16 \<\< 0.05, therefore reject the null hypothesis, so the firm variable is still siginificant, a firm is still a significant variable.
+
+To investigate whether interaction effects improved model performance, a larger candidate model containing interactions between firm and the explanatory variables was considered:
+
+```{r}
+full_model = lm(value ~ firm + year + inv + capital + firm:year + firm:inv + firm:capital, data = data)
+M2 = step(M1, scope = list(upper = full_model, lower = M1), direction = "both")
+```
+
+```{r}
+n = nrow(data)
+M3 = step(M1, scope = list(upper = full_model, lower = M1), direction = "both", k=log(n))
+```
+
+Bidirectional stepwise selection was then performed using both the Akaike Information Criterion (AIC) and the Bayesian Information Criterion (BIC). Both criteria selected the same model (M2):
+
+value∼capital+year+inv+firm+year:firm
+
+The two models were evaluated using:
+
+-   Adjusted R-squared
+
+-   Leave-one-out cross-validation (LOOCV) mean squared prediction error (MSPE),
+
+-   10-fold cross-validation MSPE.
+
+```{r}
+eM1 = resid(M1)
+hM1 = hatvalues(M1)
+MSPEM1 = mean((eM1/(1-hM1))^2)
+eM2 = resid(M2)
+hM2 = hatvalues(M2)
+MSPEM2 = mean((eM2/(1-hM2))^2)
+```
+
+```{r}
+set.seed(540697582)
+K = 10
+n = nrow(data)
+folds = sample(rep(1:K, length.out = n))
+ekM1 = numeric(n)
+ekM2 = numeric(n)
+for (k in (1:K)){
+  train = data[folds != k,]
+  test = data[folds == k,]
+  fitM1 <- lm(value ~ capital + year + inv + firm,
+            data = train)
+  fitM2 <- lm(value ~ capital + year + inv + firm + year:firm,
+            data = train)
+  predictionM1 = predict(fitM1, newdata = test)
+  predictionM2 = predict(fitM2, newdata = test)
+  ekM1[folds == k] = (test$value - predictionM1)^2
+  ekM2[folds == k] = (test$value - predictionM2)^2
+  MSPEKM1 = mean(ekM1)
+  MSPEKM2 = mean(ekM2)
+}              
+```
+
+Comparing all three evaluation methods
+
+```{r}
+data.frame(Model = c("M1","M2"), Adjusted_R2 = c(summary(M1)$adj.r.squared,summary(M2)$adj.r.squared), "MSPE Leave one out" = c(MSPEM1,MSPEM2), "MSPE 10-fold cross validation" = c(MSPEKM1,MSPEKM2)) 
+```
+
+Although the interaction model M2​ achieved a slightly higher adjusted R-squared the original fixed effects model M1 produced lower prediction errors under both leave-one-out and 10-fold cross-validation. This suggests that the additional interaction terms improve fit within the sample but do not translate into improved unseen predictive performance, therefore M2 may be overfitting the data. Consequently, the simpler model M1​ is preferred on predictive grounds.
+
+### Mixed Effect Model
+
+To account for unobserved heterogeneity between firms, two mixed effects models were considered
+
+1.   **Random Intercept Model**
+
+    value∼year+capital+inv+(1∣firm)
+
+2.   **Random Intercept and Slope Model**
+
+    value∼year+capital+inv+(1+year∣firm)
+
+    ```{r}
+    M3 = lmer(
+      value ~ year + capital + inv + (1 | firm),
+      data = data,
+      REML = TRUE
+    )
+
+    M4 = lmer(
+      value ~ year + capital + inv + (1 + year | firm),
+      data = data,
+      REML = TRUE
+    )
+    ```
+
+The random intercept model allows each firm to have its own baseline level of value, while the random slope model additionally allows for the relationship between value and year to vary across firms.
+
+```{r}
+data$M2_fit = fitted(M2)
+data$M3_fit = fitted(M3)
+data$M4_fit = fitted(M4)
+ggplot(data, aes(x = year, y = value)) +
+  geom_line(aes(group = firm), alpha = 0.3) +
+  geom_line(aes(y = M2_fit, color = "M2", group = firm)) +
+  geom_line(aes(y = M3_fit, color = "M3", group = firm)) +
+  geom_line(aes(y = M4_fit, color = "M4", group = firm)) +
+  facet_wrap(~ firm, scales = "free") +
+  scale_color_manual(values = c(
+    "M2" = "blue",
+    "M3" = "green",
+    "M4" = "red"
+  )) +
+  labs(color = "Model") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+```
+
+The fitted values from the three models are broadly similar across all firms, with each model capturing the overall trends in firm value over time. No substantial visual differences are evident between the fixed effects model and the mixed effects models, suggesting that the inclusion of random effects does not materially alter the fitted relationships.
+
+While there are minor discrepancies for certain firms and years, the models generally produce comparable fits. Consequently, the visual evidence indicates that the additional complexity introduced by the mixed effects models provides limited practical improvement over the simpler fixed effects specification.
+
+### Predictive Performance
+
+```{r}
+trainwc = data[data$year >= 1935 & data$year <= 1950, ]
+testwc = data[data$year >= 1951 & data$year <= 1954, ]
+M2_train = lm(value ~ capital + year + inv + firm + year:firm, data = trainwc)
+M4_train = lmer(value ~ year + capital + inv + (1 + year|firm), data = trainwc, REML = TRUE)
+M2_test = predict(M2_train, newdata = testwc)
+M4_test = predict(M4_train, newdata = testwc)
+testwc$M2_pred = M2_test
+testwc$M4_pred = M4_test
+head(testwc[, c("firm", "year", "value", "M2_pred", "M4_pred")])
+```
+
+```{r}
+MSPE_M2 = mean((testwc$value - testwc$M2_pred)^2)
+MSPE_M4 = mean((testwc$value - testwc$M4_pred)^2)
+data.frame(Model = c("M2","M4"), MSPE = c(MSPE_M2,MSPE_M4))
+```
+
+The fixed effects model (M2) and the random effects model (M4) were fitted using the training data and then used to predict firm values in the test period. Predictive performance was assessed using the mean squared prediction error (MSPE).
+
+The fixed effects model achieved a lower MSPE than the mixed effects model, indicating a better predictive peformance. This suggests that, for this dataset, the additional complexity introduced by the random effects specification does not translate into improved model fit, highlighting a key concept that more is not always better.
